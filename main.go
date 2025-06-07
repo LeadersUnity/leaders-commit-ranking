@@ -10,7 +10,19 @@ import (
 
 	"github.com/google/go-github/v57/github"
 	"golang.org/x/oauth2"
+	"image/color" // For plot colors
+	"sort"
+
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/vg"
 )
+
+// RepoCommitCount はリポジトリ名とコミット数を保持する構造体
+type RepoCommitCount struct {
+	Name        string
+	CommitCount int
+}
 
 func min(a, b int) int {
 	if a < b {
@@ -141,44 +153,8 @@ func (ghc *GitHubClient) countAllCommits(owner, repoName string) (int, error) {
 	return commitCount, nil
 }
 
-// GetRepositoryCommitAnalysisData fetches the total commit count and recent commit messages for a repository.
-func (ghc *GitHubClient) GetRepositoryCommitAnalysisData(owner, repoName string, maxMessagesToFetch int) (totalCommits int, recentCommitMessages []string, err error) {
-	// Get total commit count accurately
-	totalCommits, err = ghc.countAllCommits(owner, repoName)
-	if err != nil {
-		// countAllCommits returns 0 for empty repo without error if status is 409
-		if totalCommits == 0 && err == nil {
-			return 0, []string{}, nil
-		}
-		return 0, nil, fmt.Errorf("error counting all commits for %s/%s: %w", owner, repoName, err)
-	}
-
-	if totalCommits == 0 {
-		return 0, []string{}, nil
-	}
-
-	if maxMessagesToFetch <= 0 { // If no messages are requested, just return the count
-		return totalCommits, []string{}, nil
-	}
-
-	// Fetch recent commit messages
-	opt := &github.CommitsListOptions{
-		ListOptions: github.ListOptions{PerPage: maxMessagesToFetch},
-	}
-
-	commitsPage, _, err := ghc.client.Repositories.ListCommits(ghc.ctx, owner, repoName, opt)
-	if err != nil {
-		// We already have totalCommits, so we can return that with an error for messages.
-		return totalCommits, nil, fmt.Errorf("failed to list recent commits for %s/%s: %w", owner, repoName, err)
-	}
-
-	for _, commit := range commitsPage {
-		if commit != nil && commit.Commit != nil && commit.Commit.Message != nil && *commit.Commit.Message != "" {
-			recentCommitMessages = append(recentCommitMessages, *commit.Commit.Message)
-		}
-	}
-	return totalCommits, recentCommitMessages, nil
-}
+// GetRepositoryCommitAnalysisData is no longer needed for the simple bar chart.
+// func (ghc *GitHubClient) GetRepositoryCommitAnalysisData(...) { ... }
 
 func parseFlags() *Config {
 	orgName := flag.String("org", "", "GitHub Organization name (required)")
@@ -214,45 +190,158 @@ func main() {
 		return
 	}
 
-	log.Printf("Found %d repositories. Fetching commit counts...\n", len(repos))
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Printf("%-40s | %s\n", "Repository", "Commit Count")
-	fmt.Println(strings.Repeat("-", 50))
+	log.Printf("Found %d repositories. Fetching commit counts and generating ranking...\n", len(repos))
 
-	totalCommits := 0
+	var repoCommits []RepoCommitCount
+	maxCommitsValue := 0 // To scale the bar chart
+
 	for _, repo := range repos {
-		if repo.GetName() == "" { // まれにNameが空のことがあるかもしれない
+		repoName := repo.GetName()
+		if repoName == "" {
+			log.Println("Skipping repository with no name.")
 			continue
 		}
 
-		// Fetch commit count and recent messages
-		maxRecentMessages := 30 // Number of recent commit messages to fetch for analysis
-		commitCount, messages, err := ghClient.GetRepositoryCommitAnalysisData(cfg.Organization, repo.GetName(), maxRecentMessages)
+		log.Printf("Fetching commit count for %s...", repoName)
+		// Use GetRepositoryCommitCount or countAllCommits directly.
+		// GetRepositoryCommitCount internally calls countAllCommits if needed.
+		commitCount, err := ghClient.GetRepositoryCommitCount(cfg.Organization, repoName)
 		if err != nil {
-			log.Printf("Could not get commit data for %s: %v\n", repo.GetName(), err)
-			// We might still have a commit count if only message fetching failed, but GetRepositoryCommitAnalysisData structure implies error means all data might be suspect.
-			// For simplicity, we skip if there's an error here.
+			log.Printf("Could not get commit count for %s: %v. Marking as error.", repoName, err)
+			repoCommits = append(repoCommits, RepoCommitCount{Name: repoName, CommitCount: -1}) // Mark as error
 			continue
 		}
-
-		fmt.Printf("%-40s | %d\n", repo.GetName(), commitCount)
-		totalCommits += commitCount
-
-		// Log fetched messages (placeholder for Gemini integration)
-		if len(messages) > 0 {
-			previewMsg := messages[0]
-			log.Printf("Fetched %d recent commit messages for %s (e.g., \"%s...\")\n", len(messages), repo.GetName(), previewMsg[:min(len(previewMsg), 50)])
-		} else if commitCount > 0 {
-			log.Printf("No recent commit messages fetched for %s, though it has %d commits.\n", repo.GetName(), commitCount)
+		repoCommits = append(repoCommits, RepoCommitCount{Name: repoName, CommitCount: commitCount})
+		if commitCount > maxCommitsValue {
+			maxCommitsValue = commitCount
 		}
-		// TODO: Here you would prepare data and call Gemini API with commitCount and messages
 	}
 
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Printf("%-40s | %d\n", "Total Commits", totalCommits)
-	if len(repos) > 0 {
-		avgCommits := float64(totalCommits) / float64(len(repos))
-		fmt.Printf("%-40s | %.2f\n", "Average Commits per Repo", avgCommits)
+	// Sort by commit count in descending order
+	sort.Slice(repoCommits, func(i, j int) bool {
+		// Handle error case (-1) by pushing them to the bottom
+		if repoCommits[i].CommitCount == -1 {
+			return false
+		}
+		if repoCommits[j].CommitCount == -1 {
+			return true
+		}
+		return repoCommits[i].CommitCount > repoCommits[j].CommitCount
+	})
+
+	// Generate and save bar chart
+	if len(repoCommits) > 0 && maxCommitsValue > 0 {
+		p := plot.New()
+
+		p.Title.Text = fmt.Sprintf("Commit Count Ranking for %s", cfg.Organization)
+		p.Y.Label.Text = "Commit Count"
+		p.X.Label.Text = "Repositories"
+
+		// Prepare data for bar chart
+		var plotValues plotter.Values
+		var labels []string
+		// Consider limiting the number of repos to plot if there are too many for readability
+		numReposToPlot := len(repoCommits)
+		// if numReposToPlot > 20 { // Example limit
+		//  numReposToPlot = 20
+		//  log.Printf("Limiting bar chart to top %d repositories for readability.", numReposToPlot)
+		// }
+
+		for i := 0; i < numReposToPlot; i++ {
+			rc := repoCommits[i]
+			if rc.CommitCount < 0 { // Skip errored repos
+				continue
+			}
+			plotValues = append(plotValues, float64(rc.CommitCount))
+
+			// Process repository name to remove prefix
+			displayName := rc.Name
+			if idx := strings.IndexAny(displayName, "-_"); idx != -1 {
+				// Check if there's anything after the prefix
+				if idx+1 < len(displayName) {
+					displayName = displayName[idx+1:]
+				}
+				// If the prefix is at the end or only prefix exists, keep original or decide on a policy
+				// For now, if only prefix or prefix at end, it will effectively take the part after it (empty or original)
+				// A more robust way might be to ensure the part after prefix is substantial.
+			}
+			labels = append(labels, displayName)
+		}
+
+		if len(plotValues) > 0 {
+			bars, err := plotter.NewBarChart(plotValues, vg.Points(20)) // Adjust bar width as needed
+			if err != nil {
+				log.Fatalf("Could not create bar chart: %v", err)
+			}
+			bars.LineStyle.Width = vg.Length(0)     // No border for bars
+			bars.Color = color.RGBA{B: 128, A: 255} // Blue bars
+			bars.Horizontal = false                 // Vertical bars
+
+			p.Add(bars)
+			p.NominalX(labels...)
+			p.HideY() // Hide Y axis numbers if labels are directly on bars or too cluttered
+			// Or, to show Y-axis ticks:
+			// p.Y.Tick.Marker = plot.DefaultTicks{}
+
+			// Rotate X-axis labels for better readability if many repos
+			p.X.Tick.Label.Rotation = 0.8 // Radians, approx 45 degrees
+			// p.X.Tick.Label.YAlign = vg.AlignTop // Temporarily commented out due to undefined error
+			// p.X.Tick.Label.XAlign = vg.AlignRight // Temporarily commented out due to undefined error
+			// Default alignment will be used. If labels overlap, consider adjusting Rotation or plot width.
+
+			// Save the plot to a PNG file.
+			// Adjust width based on number of labels for better readability
+			plotWidth := vg.Length(len(labels)) * 1.5 * vg.Inch // Dynamic width
+			if plotWidth < 6*vg.Inch {
+				plotWidth = 6 * vg.Inch // Minimum width
+			}
+			if plotWidth > 20*vg.Inch {
+				plotWidth = 20 * vg.Inch // Maximum width
+			}
+			plotHeight := 6 * vg.Inch
+
+			if err := p.Save(plotWidth, plotHeight, "commits_barchart.png"); err != nil {
+				log.Fatalf("Could not save plot: %v", err)
+			}
+			log.Println("Bar chart saved to commits_barchart.png")
+		} else {
+			log.Println("No valid data to plot for bar chart.")
+		}
+	} else {
+		log.Println("No repositories with commits found to generate a chart.")
 	}
-	fmt.Println(strings.Repeat("=", 50))
+
+	// Print simple table as well (optional, can be removed if chart is primary output)
+	fmt.Println(strings.Repeat("=", 80))
+	fmt.Printf("Commit Count Ranking for Organization: %s (Data also in commits_barchart.png)\n", cfg.Organization)
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-45s | %s\n", "Repository", "Commits")
+	fmt.Println(strings.Repeat("-", 80))
+	for _, rc := range repoCommits {
+		if rc.CommitCount == -1 {
+			fmt.Printf("%-45s | %s\n", rc.Name, "ERROR")
+			continue
+		}
+		fmt.Printf("%-45s | %d\n", rc.Name, rc.CommitCount)
+	}
+	fmt.Println(strings.Repeat("=", 80))
+
+	// Calculate and print total and average
+	totalOrgCommits := 0
+	validRepoCount := 0
+	for _, rc := range repoCommits {
+		if rc.CommitCount != -1 {
+			totalOrgCommits += rc.CommitCount
+			validRepoCount++
+		}
+	}
+
+	if validRepoCount > 0 {
+		avgCommits := float64(totalOrgCommits) / float64(validRepoCount)
+		fmt.Printf("Total commits across %d valid repositories: %d\n", validRepoCount, totalOrgCommits)
+		fmt.Printf("Average commits per valid repository: %.2f\n", avgCommits)
+	} else {
+		fmt.Println("No valid repository data to calculate total or average commits.")
+	}
+	fmt.Println(strings.Repeat("=", 80))
 }
