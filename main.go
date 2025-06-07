@@ -233,19 +233,17 @@ func main() {
 	if len(repoCommits) > 0 && maxCommitsValue > 0 {
 		p := plot.New()
 
-		p.Title.Text = fmt.Sprintf("Commit Count Ranking for %s", cfg.Organization)
 		p.Y.Label.Text = "Commit Count"
-		p.X.Label.Text = "Repositories"
 
 		// Prepare data for bar chart
 		var plotValues plotter.Values
 		var labels []string
-		// Consider limiting the number of repos to plot if there are too many for readability
+		// Limit to top 10 repositories for better readability
 		numReposToPlot := len(repoCommits)
-		// if numReposToPlot > 20 { // Example limit
-		//  numReposToPlot = 20
-		//  log.Printf("Limiting bar chart to top %d repositories for readability.", numReposToPlot)
-		// }
+		if numReposToPlot > 10 {
+			numReposToPlot = 10
+			log.Printf("Limiting bar chart to top %d repositories for readability.", numReposToPlot)
+		}
 
 		for i := 0; i < numReposToPlot; i++ {
 			rc := repoCommits[i]
@@ -269,7 +267,7 @@ func main() {
 		}
 
 		if len(plotValues) > 0 {
-			bars, err := plotter.NewBarChart(plotValues, vg.Points(20)) // Adjust bar width as needed
+			bars, err := plotter.NewBarChart(plotValues, vg.Points(50)) // Wider bars for better visibility
 			if err != nil {
 				log.Fatalf("Could not create bar chart: %v", err)
 			}
@@ -277,26 +275,22 @@ func main() {
 			bars.Color = color.RGBA{B: 128, A: 255} // Blue bars
 			bars.Horizontal = false                 // Vertical bars
 
-			p.Add(bars)
-			p.NominalX(labels...)
-			p.HideY() // Hide Y axis numbers if labels are directly on bars or too cluttered
-			// Or, to show Y-axis ticks:
-			// p.Y.Tick.Marker = plot.DefaultTicks{}
-
-			// Rotate X-axis labels for better readability if many repos
-			p.X.Tick.Label.Rotation = 0.8 // Radians, approx 45 degrees
-			// p.X.Tick.Label.YAlign = vg.AlignTop // Temporarily commented out due to undefined error
-			// p.X.Tick.Label.XAlign = vg.AlignRight // Temporarily commented out due to undefined error
-			// Default alignment will be used. If labels overlap, consider adjusting Rotation or plot width.
+		p.Add(bars)
+		p.NominalX(labels...)
+		// Show Y-axis for better reference with fewer repositories
+		p.Y.Tick.Marker = plot.DefaultTicks{}
+		
+		// Increase X-axis label font size
+		p.X.Tick.Label.Font.Size = vg.Points(14) // Increased from default size
 
 			// Save the plot to a PNG file.
 			// Adjust width based on number of labels for better readability
-			plotWidth := vg.Length(len(labels)) * 1.5 * vg.Inch // Dynamic width
+			plotWidth := vg.Length(len(labels)) * 1.2 * vg.Inch // Reduced spacing between bars
 			if plotWidth < 6*vg.Inch {
-				plotWidth = 6 * vg.Inch // Minimum width
+				plotWidth = 6 * vg.Inch // Minimum width for good spacing
 			}
-			if plotWidth > 20*vg.Inch {
-				plotWidth = 20 * vg.Inch // Maximum width
+			if plotWidth > 12*vg.Inch {
+				plotWidth = 12 * vg.Inch // Maximum width
 			}
 			plotHeight := 6 * vg.Inch
 
