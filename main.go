@@ -12,6 +12,13 @@ import (
 	"golang.org/x/oauth2"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // Config はアプリケーションの設定を保持する構造体
 type Config struct {
 	Organization string
@@ -134,6 +141,45 @@ func (ghc *GitHubClient) countAllCommits(owner, repoName string) (int, error) {
 	return commitCount, nil
 }
 
+// GetRepositoryCommitAnalysisData fetches the total commit count and recent commit messages for a repository.
+func (ghc *GitHubClient) GetRepositoryCommitAnalysisData(owner, repoName string, maxMessagesToFetch int) (totalCommits int, recentCommitMessages []string, err error) {
+	// Get total commit count accurately
+	totalCommits, err = ghc.countAllCommits(owner, repoName)
+	if err != nil {
+		// countAllCommits returns 0 for empty repo without error if status is 409
+		if totalCommits == 0 && err == nil {
+			return 0, []string{}, nil
+		}
+		return 0, nil, fmt.Errorf("error counting all commits for %s/%s: %w", owner, repoName, err)
+	}
+
+	if totalCommits == 0 {
+		return 0, []string{}, nil
+	}
+
+	if maxMessagesToFetch <= 0 { // If no messages are requested, just return the count
+		return totalCommits, []string{}, nil
+	}
+
+	// Fetch recent commit messages
+	opt := &github.CommitsListOptions{
+		ListOptions: github.ListOptions{PerPage: maxMessagesToFetch},
+	}
+
+	commitsPage, _, err := ghc.client.Repositories.ListCommits(ghc.ctx, owner, repoName, opt)
+	if err != nil {
+		// We already have totalCommits, so we can return that with an error for messages.
+		return totalCommits, nil, fmt.Errorf("failed to list recent commits for %s/%s: %w", owner, repoName, err)
+	}
+
+	for _, commit := range commitsPage {
+		if commit != nil && commit.Commit != nil && commit.Commit.Message != nil && *commit.Commit.Message != "" {
+			recentCommitMessages = append(recentCommitMessages, *commit.Commit.Message)
+		}
+	}
+	return totalCommits, recentCommitMessages, nil
+}
+
 func parseFlags() *Config {
 	orgName := flag.String("org", "", "GitHub Organization name (required)")
 	token := flag.String("token", os.Getenv("GITHUB_TOKEN"), "GitHub Personal Access Token (optional, defaults to GITHUB_TOKEN env var)")
@@ -178,13 +224,28 @@ func main() {
 		if repo.GetName() == "" { // まれにNameが空のことがあるかもしれない
 			continue
 		}
-		commitCount, err := ghClient.GetRepositoryCommitCount(cfg.Organization, repo.GetName())
+
+		// Fetch commit count and recent messages
+		maxRecentMessages := 30 // Number of recent commit messages to fetch for analysis
+		commitCount, messages, err := ghClient.GetRepositoryCommitAnalysisData(cfg.Organization, repo.GetName(), maxRecentMessages)
 		if err != nil {
-			log.Printf("Could not get commit count for %s: %v\n", repo.GetName(), err)
+			log.Printf("Could not get commit data for %s: %v\n", repo.GetName(), err)
+			// We might still have a commit count if only message fetching failed, but GetRepositoryCommitAnalysisData structure implies error means all data might be suspect.
+			// For simplicity, we skip if there's an error here.
 			continue
 		}
+
 		fmt.Printf("%-40s | %d\n", repo.GetName(), commitCount)
 		totalCommits += commitCount
+
+		// Log fetched messages (placeholder for Gemini integration)
+		if len(messages) > 0 {
+			previewMsg := messages[0]
+			log.Printf("Fetched %d recent commit messages for %s (e.g., \"%s...\")\n", len(messages), repo.GetName(), previewMsg[:min(len(previewMsg), 50)])
+		} else if commitCount > 0 {
+			log.Printf("No recent commit messages fetched for %s, though it has %d commits.\n", repo.GetName(), commitCount)
+		}
+		// TODO: Here you would prepare data and call Gemini API with commitCount and messages
 	}
 
 	fmt.Println(strings.Repeat("=", 50))
